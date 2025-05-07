@@ -295,6 +295,12 @@ def process_downloaded_data(downloads_path):
         # Read and clean data
         df = pd.read_csv(latest_file, delimiter=';', skiprows=7)
         df = clean_espacenet_data(df)
+        # if 'family_jurisdictions' not in df.columns:
+        #     df['family_jurisdictions'] = None
+        # if 'family_members' not in df.columns:
+        #     df['family_members'] = None
+
+    
 
           
         return df

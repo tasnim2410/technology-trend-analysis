@@ -1,7 +1,6 @@
 # technology-trend-analysis/backend/cleaners.py
 import pandas as pd
 import re
-from family_members import process_dataframe
 def clean_espacenet_data(df: pd.DataFrame) -> pd.DataFrame:
     """Clean Espacenet CSV data."""
     df = df.dropna(how='all')
@@ -46,8 +45,8 @@ def clean_espacenet_data(df: pd.DataFrame) -> pd.DataFrame:
     df['IPC'] = df['IPC'].str.split(r'\s+')
 
 
-    if 'Publication number' in df.columns:
-      df = process_dataframe(df, patent_col='Publication number')
+    # if 'Publication number' in df.columns:
+    #   df = process_dataframe(df, patent_col='Publication number')
 
     def split_cpc(classification):
     # Split only at ") " but keep the ")"
