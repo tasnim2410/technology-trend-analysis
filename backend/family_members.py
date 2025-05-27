@@ -22,6 +22,15 @@ from selenium.common.exceptions import TimeoutException
 from bs4 import BeautifulSoup
 import pandas as pd
 import threading
+from flask import Flask, request, jsonify
+from sqlalchemy import create_engine, text
+import concurrent.futures
+import os
+import requests
+import time
+from urllib.parse import quote
+import pandas as pd
+from dotenv import load_dotenv
 # Logging Configuration
 logging.basicConfig(
     level=logging.INFO,
@@ -79,7 +88,12 @@ df.rename(columns={
     'Numéro de famille': 'Family number'
 }, inplace=True)
 #cleaning the date columns
-df[['first publication date','second publication date']] = df['Publication date'].str.split(' ' , n=1 , expand= True)
+# Split 'Publication date' into two columns using regex
+df['first publication date'] = df['Publication date'].str.extract(r'^(\S+)', expand=False)
+df['second publication date'] = df['Publication date'].str.extract(r'^\S+\s+(.*)', expand=False)
+
+# Clean 'second publication date' by removing unwanted newline characters
+
 #df['second publication date'] = df['second publication date'].str.strip('\n')
 df['second publication date'] = df['second publication date'].str.strip('\r')
 df['second publication date'] = df['second publication date'].str.strip('\n')
@@ -106,13 +120,7 @@ df1 = df.iloc[:n].copy()       # First part
 df2 = df.iloc[n:2*n].copy()    # Second part
 df3 = df.iloc[2*n:].copy()     # Third part
 
-import concurrent.futures
-import os
-import requests
-import time
-from urllib.parse import quote
-import pandas as pd
-from dotenv import load_dotenv
+
 
 # Global token cache for multiple credentials
 TOKENS = {}
@@ -235,9 +243,8 @@ if __name__ == "__main__":
 ####processing df2
 #3 threads
 
-
 class PatentsSearch:
-    def __init__(self, headless=True):
+    def __init__(self, search_keywords=None,headless=True):
         """Initialize the scraper with enhanced compatibility options."""
         options = uc.ChromeOptions()
         if headless:
@@ -246,6 +253,10 @@ class PatentsSearch:
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-blink-features=AutomationControlled')
         options.add_argument('--disable-extensions')
+        self.search_keywords = search_keywords
+        if search_keywords:
+            keywords = [key.strip() for key in search_keywords.keys()]  # Remove trailing space from "Autonomous "
+            self.QUERY = " AND ".join([f'tac="{keyword}"' for keyword in keywords])
         
         try:
             self.driver = uc.Chrome(
@@ -264,6 +275,25 @@ class PatentsSearch:
                 options=options,
                 driver_executable_path=None
             )
+    def set_query(self,search_keywords): 
+        field_mapping = {
+        "title": "ti",
+        "abstract": "ab",
+        "claims": "cl",
+        "title,abstract or claims": "ctxt",
+        "all text fields": "ftxt",
+        "title or abstract": "ta",
+        "description": "desc",
+        "all text fields or names": "nftxt",
+        "title , abstract or names": "ntxt"
+            }
+        self.search_keywords = search_keywords
+        parts=[]
+        for keyword , field in search_keywords.items():
+            field_code = field_mapping.get(field, "ctxt")
+            parts.append(f'{field_code}="{keyword}"')
+        return " AND ".join(parts)
+        
 
     def add_random_delay(self, min_seconds=1, max_seconds=3):
         """Add a random delay to mimic human behavior."""
@@ -302,13 +332,18 @@ class PatentsSearch:
         if self.driver:
             self.driver.quit()
 
-def process_rows(df, indices):
+def process_rows(df, indices,search_keywords,headless=True):
     """Process a subset of DataFrame rows using a dedicated PatentsSearch instance."""
-    scraper = PatentsSearch(headless=False)  # Set to False as per task requirement for visible windows
+    scraper = PatentsSearch(search_keywords=search_keywords,headless=False) 
+    scraper.QUERY = scraper.set_query(search_keywords)# Set to False as per task requirement for visible windows
+    row = df.loc[index]
+            # Proper URL construction
+    family_number = str(row['family number']).strip()
+    publication_number = str(row['first publication number']).strip()
     try:
         for index in indices:
             row = df.loc[index]
-            url = f"https://worldwide.espacenet.com/patent/search/family/{row['family number']}/publication/{row['first publication number']}?q=hydrogen%20battery"
+            url = f"https://worldwide.espacenet.com/patent/search/family/{family_number}/publication/{publication_number}?q={quote(scraper.QUERY)}"
             html = scraper.get_page_html(url)
             if html:
                 family_members = scraper.parse_html(html)
@@ -320,8 +355,13 @@ def process_rows(df, indices):
 
 if __name__ == "__main__":
     # Assuming df is defined elsewhere with 'family number' and 'first publication number' columns
-    
+    search_keywords = {
+    "Autonomous": "title,abstract or claims",
+    "Vehicles": "title,abstract or claims"
+}
     df2['family_members'] = None
+    #conn = None
+    #search_keywords = get_last_search_keywords()
 
     # Split the DataFrame indices into three parts
     indices = df2.index.tolist()
@@ -341,7 +381,7 @@ if __name__ == "__main__":
     # Create three threads, each with its own PatentsSearch instance
     threads = []
     for part in parts:
-        thread = threading.Thread(target=process_rows, args=(df2, part))
+        thread = threading.Thread(target=process_rows, args=(df2, part,search_keywords))
         threads.append(thread)
 
     # Start all three threads to run three browser windows concurrently

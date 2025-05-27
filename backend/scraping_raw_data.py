@@ -4,6 +4,7 @@ import glob
 import time
 import random
 import pandas as pd
+from sqlalchemy import text
 from sqlalchemy import create_engine
 from dotenv import load_dotenv
 from bs4 import BeautifulSoup
@@ -25,6 +26,9 @@ class DatabaseManager:
     def store_patents(self, df):
         """Store patent data in PostgreSQL"""
         try:
+            with self.engine.connect() as connection : 
+                connection.execute(text("tRUNCATE TABLE raw_patents;"))
+                connection.commit()
             df.to_sql('raw_patents', self.engine, 
                       if_exists='append', 
                       index=False,
@@ -68,7 +72,6 @@ class EspacenetScraper:
             'description' : 'desc',
             'all text fields or names' : 'nftxt',
             'title , abstract or names' : 'ntxt'
-              # Full text search
         }
         
         query_parts = []
@@ -336,8 +339,8 @@ def main(search_keywords, max_results=500):
 if __name__ == '__main__':
     # Configuration
     SEARCH_KEYWORDS = {
-        "cloud": "title,abstract or claims",
-        "security": "title,abstract or claims"
+        "quantum": "title,abstract or claims",
+        "tunneling": "title,abstract or claims"
     }
     
     # Run pipeline
