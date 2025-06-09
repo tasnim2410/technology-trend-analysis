@@ -7,7 +7,7 @@ db = SQLAlchemy()
 class RawPatent(db.Model):
     __tablename__ = 'raw_patents'
     id = db.Column('No', db.Integer, primary_key=True)
-    title = db.Column('Title', db.String(255), nullable=False)
+    title = db.Column('Title', db.Text, nullable=False)
     inventors = db.Column('Inventors', db.Text, nullable=True)
     applicants = db.Column('Applicants', db.Text, nullable=True)
     publication_number = db.Column('Publication number', db.String(100), nullable=False)
@@ -171,3 +171,192 @@ class ResearchData2(db.Model):
             'field': self.field,
             'jif_5years': self.jif_5years
         }
+
+
+# class ResearchData2(db.Model):
+#     __tablename__ = 'research_data2'
+
+#     id                            = db.Column(db.BigInteger, primary_key=True)
+#     paper_id                      = db.Column(db.String(255), unique=True, nullable=False)  # we'll map doi_clean → paper_id
+#     doi                           = db.Column(db.String(255), nullable=True)
+#     title                         = db.Column(db.Text, nullable=False)
+#     official_title                = db.Column(db.Text, nullable=True)
+#     abstract                      = db.Column(db.Text, nullable=True)
+#     relevance                     = db.Column(db.Float, nullable=True)
+#     year                          = db.Column(db.Integer, nullable=True)                   # from 'Year'
+#     publication_date              = db.Column(db.Date, nullable=True)
+#     publication_types             = db.Column(db.ARRAY(db.String), nullable=True)
+#     source_type                   = db.Column(db.String(50), nullable=True)
+#     publication_venue_name        = db.Column(db.Text, nullable=True)
+#     publication_venue_type        = db.Column(db.String(100), nullable=True)
+#     journal_name                  = db.Column(db.String(255), nullable=True)
+#     journal_issn_l                = db.Column(db.String(50), nullable=True)
+#     journal_issn_l_clean          = db.Column(db.String(50), nullable=True)
+#     issn                          = db.Column(db.String(50), nullable=True)
+#     publisher                     = db.Column(db.String(255), nullable=True)
+#     publisher_hierarchy           = db.Column(db.ARRAY(db.String), nullable=True)
+#     main_topic                    = db.Column(db.String(100), nullable=True)
+#     fields_of_study               = db.Column(db.ARRAY(db.String), nullable=True)
+#     academic_domain               = db.Column(db.String(100), nullable=True)
+#     subcategory                   = db.Column(db.String(100), nullable=True)
+#     keyword_relevance_score       = db.Column(db.Float, nullable=True)
+#     keywords                      = db.Column(db.ARRAY(db.String), nullable=True)
+#     all_journal_sources           = db.Column(db.ARRAY(db.String), nullable=True)
+#     authorships_countries         = db.Column(db.ARRAY(db.String), nullable=True)
+#     reference_count               = db.Column(db.BigInteger, nullable=True)
+#     citation_count                = db.Column(db.Integer, nullable=True)
+#     influential_citation_count    = db.Column(db.Integer, nullable=True)
+#     field_weighted_citation_impact= db.Column(db.Float, nullable=True)
+#     jif_5years                    = db.Column(db.Float, nullable=True)
+
+#     def to_dict(self):
+#         return {
+#             'id': self.id,
+#             'paper_id': self.paper_id,
+#             'doi': self.doi,
+#             'title': self.title,
+#             'official_title': self.official_title,
+#             'abstract': self.abstract,
+#             'relevance': self.relevance,
+#             'year': self.year,
+#             'publication_date': self.publication_date.isoformat() if self.publication_date else None,
+#             'publication_types': self.publication_types,
+#             'source_type': self.source_type,
+#             'publication_venue_name': self.publication_venue_name,
+#             'publication_venue_type': self.publication_venue_type,
+#             'journal_name': self.journal_name,
+#             'journal_issn_l': self.journal_issn_l,
+#             'journal_issn_l_clean': self.journal_issn_l_clean,
+#             'issn': self.issn,
+#             'publisher': self.publisher,
+#             'publisher_hierarchy': self.publisher_hierarchy,
+#             'main_topic': self.main_topic,
+#             'fields_of_study': self.fields_of_study,
+#             'academic_domain': self.academic_domain,
+#             'subcategory': self.subcategory,
+#             'keyword_relevance_score': self.keyword_relevance_score,
+#             'keywords': self.keywords,
+#             'all_journal_sources': self.all_journal_sources,
+#             'authorships_countries': self.authorships_countries,
+#             'reference_count': self.reference_count,
+#             'citation_count': self.citation_count,
+#             'influential_citation_count': self.influential_citation_count,
+#             'field_weighted_citation_impact': self.field_weighted_citation_impact,
+#             'jif_5years': self.jif_5years
+#         }
+        
+        
+class ResearchData3(db.Model):
+    __tablename__ = 'research_data3'
+
+    id = db.Column(db.BigInteger, primary_key=True)
+    paper_id = db.Column(db.String(255), nullable=False)
+    doi = db.Column(db.String(255), nullable=True)
+    title = db.Column(db.Text, nullable=False)
+    official_title = db.Column(db.Text, nullable=True)
+    abstract = db.Column(db.Text, nullable=True)
+    relevance = db.Column(db.Float, nullable=True)
+    year = db.Column(db.Integer, nullable=True)
+    publication_date = db.Column(db.Date, nullable=True)
+    publication_types = db.Column(db.ARRAY(db.String), nullable=True)
+    source_type = db.Column(db.String(50), nullable=True)
+    publication_venue_name = db.Column(db.Text, nullable=True)
+    publication_venue_type = db.Column(db.String(100), nullable=True)
+    journal_name = db.Column(db.String(255), nullable=True)
+    journal_issn_l = db.Column(db.String(50), nullable=True)
+    journal_issn_l_clean = db.Column(db.String(50), nullable=True)
+    issn = db.Column(db.String(50), nullable=True)
+    publisher = db.Column(db.String(255), nullable=True)
+    publisher_hierarchy = db.Column(db.ARRAY(db.String), nullable=True)
+    main_topic = db.Column(db.String(100), nullable=True)
+    fields_of_study = db.Column(db.ARRAY(db.String), nullable=True)
+    academic_domain = db.Column(db.String(100), nullable=True)
+    subcategory = db.Column(db.String(100), nullable=True)
+    keyword_relevance_score = db.Column(db.Float, nullable=True)
+    keywords = db.Column(db.ARRAY(db.String), nullable=True)
+    all_journal_sources = db.Column(db.ARRAY(db.String), nullable=True)
+    authorships_countries = db.Column(db.ARRAY(db.String), nullable=True)
+    reference_count = db.Column(db.BigInteger, nullable=True)
+    citation_count = db.Column(db.Integer, nullable=True)
+    influential_citation_count = db.Column(db.Integer, nullable=True)
+    field_weighted_citation_impact = db.Column(db.Float, nullable=True)
+    jif_5years = db.Column(db.Float, nullable=True)
+    field = db.Column(db.String(255), nullable=True) 
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'paper_id': self.paper_id,
+            'doi': self.doi,
+            'title': self.title,
+            'official_title': self.official_title,
+            'abstract': self.abstract,
+            'relevance': self.relevance,
+            'year': self.year,
+            'publication_date': self.publication_date.isoformat() if self.publication_date else None,
+            'publication_types': self.publication_types,
+            'source_type': self.source_type,
+            'publication_venue_name': self.publication_venue_name,
+            'publication_venue_type': self.publication_venue_type,
+            'journal_name': self.journal_name,
+            'journal_issn_l': self.journal_issn_l,
+            'journal_issn_l_clean': self.journal_issn_l_clean,
+            'issn': self.issn,
+            'publisher': self.publisher,
+            'publisher_hierarchy': self.publisher_hierarchy,
+            'main_topic': self.main_topic,
+            'fields_of_study': self.fields_of_study,
+            'academic_domain': self.academic_domain,
+            'subcategory': self.subcategory,
+            'keyword_relevance_score': self.keyword_relevance_score,
+            'keywords': self.keywords,
+            'all_journal_sources': self.all_journal_sources,
+            'authorships_countries': self.authorships_countries,
+            'reference_count': self.reference_count,
+            'citation_count': self.citation_count,
+            'influential_citation_count': self.influential_citation_count,
+            'field_weighted_citation_impact': self.field_weighted_citation_impact,
+            'jif_5years': self.jif_5years,
+            'field': self.field
+        }
+        
+        
+class PatentKeyword(db.Model):
+    __tablename__ = 'patent_keywords'
+    id = db.Column(db.Integer, primary_key=True)
+    first_publication_number = db.Column(db.String(50), nullable=False, index=True)
+    title = db.Column(db.Text, nullable=False)
+    first_filing_year = db.Column(db.Integer, nullable=True)
+    keywords = db.Column(db.ARRAY(db.String), nullable=True)  # Stores extracted keywords
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'first_publication_number': self.first_publication_number,
+            'title': self.title,
+            'first_filing_year': self.first_filing_year,
+            'keywords': self.keywords
+        }   
+    
+    
+class Window(db.Model):
+    __tablename__ = 'windows'
+    id = db.Column(db.Integer, primary_key=True)
+    start_year = db.Column(db.Integer, nullable=False)
+    end_year = db.Column(db.Integer, nullable=False)
+
+class Topic(db.Model):
+    __tablename__ = 'topics'
+    id = db.Column(db.Integer, primary_key=True)
+    window_id = db.Column(db.Integer, db.ForeignKey('windows.id'), nullable=False)
+    topic_number = db.Column(db.Integer, nullable=False)
+    words = db.Column(db.ARRAY(db.String), nullable=False)
+    weights = db.Column(db.ARRAY(db.Float), nullable=False)
+    window = db.relationship('Window', backref='topics')
+    
+class Divergence(db.Model):
+    __tablename__ = 'divergences'
+    id = db.Column(db.Integer, primary_key=True)
+    from_year = db.Column(db.Integer, nullable=False)
+    to_year = db.Column(db.Integer, nullable=False)
+    divergence = db.Column(db.Float, nullable=False)

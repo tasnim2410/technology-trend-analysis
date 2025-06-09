@@ -4,6 +4,7 @@ import time
 from flask import Flask, request, jsonify
 from dotenv import load_dotenv
 import pandas as pd
+from sqlalchemy import text
 # import your scraper & post‐download processor
 from scraping_raw_data import EspacenetScraper, process_downloaded_data ,DatabaseManager
 #from family_members import ensure_columns_exist
@@ -28,6 +29,7 @@ from sqlalchemy import text
 import uuid
 from family_members2 import PatentsSearch , build_espacenet_url
 import ast
+from keyword_analysis import preprocess_text , extract_keywords ,analyze_topic_evolution
 from cleaners import clean_family_members , extract_country_codes  # Import from your module
 from research_retrieve import fetch_research_data , process_research_data, store_research_data
 from research_retrieve2 import fetch_research_data2 , process_research_data2, store_research_data2
@@ -35,12 +37,28 @@ from impact_factor_processor import clean_and_process_data , store_processed_dat
 from sqlalchemy.exc import SQLAlchemyError
 from pandas.errors import ParserError
 from research_retrieve2 import fetch_research_data2, process_research_data2, store_research_data2
+from research_retrieve3 import (
+    fetch_research_data3, process_research_data3, fetch_openalex_works, process_documents,
+    clean_issn, clean_doi, renaming_columns, merge_unique_by_doi, store_research_data3
+)
+from flask_cors import CORS
+from sklearn.feature_extraction.text import TfidfVectorizer
+import numpy as np
+from flask import jsonify
+import pandas as pd
+from collections import Counter
 
+
+from keyword_analysis import preprocess_text, analyze_topic_evolution
+import logging
+
+from db import Window, Topic , PatentKeyword ,Divergence # <-- Add this import for Window and Topic models
 load_dotenv()
 
 def create_app():
     
     app = Flask(__name__)
+    CORS(app, origins=["http://localhost:3000"])  
 
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
@@ -63,7 +81,7 @@ def create_app():
     
     @app.route('/')
     def home():
-      return '👋 Hello! Your app is running!', 200
+      return 'app is running!', 200
   
     @app.route('/api/last_search_keywords', methods=['GET'])
     def get_last_search_keywords():
@@ -162,7 +180,11 @@ def create_app():
       except Exception as e:
             print(f"Error inserting keywords into database: {e}")
             return jsonify({"error": f"Failed to insert search keywords: {str(e)}"}), 500
-    
+
+      df = df.where(pd.notnull(df), None)   
+      
+      for dtcol in df.select_dtypes(include=['datetime64[ns]']).columns:
+            df[dtcol] = df[dtcol].apply(lambda x: x.isoformat() if x is not None else None) 
     # 4) Return the response
       response_data = {
             "search_id": search_id,
@@ -408,6 +430,541 @@ def create_app():
         except Exception as e:
             logging.error(f"Unexpected error: {str(e)}")
             return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+
+
+
+
+    @app.route('/fetch_research_data', methods=['POST'])
+    def fetch_research_data():
+        # Get query from the request
+        data = request.get_json()
+        query = data.get('query')
+
+        if not query:
+            return jsonify({'error': 'Query is required'}), 400
+
+        # Load impact factors from the database for processing
+        impact_factors_df = ImpactFactor.query.all()
+
+        # Fetch and process Semantic Scholar data
+        papers = fetch_research_data3(query)
+        if not papers:
+            return jsonify({'error': 'No papers found from Semantic Scholar or API error occurred'}), 500
+        sem_df = process_research_data3(papers, impact_factors_df)
+
+        # Add DOI cleaning for Semantic Scholar DataFrame
+        sem_df['doi_clean'] = sem_df['DOI'].apply(clean_doi)
+
+        # Fetch and process OpenAlex data
+        openalex_works = fetch_openalex_works(max_docs=300, per_page=200)
+        if not openalex_works:
+            return jsonify({'error': 'No works found from OpenAlex or API error occurred'}), 500
+    
+        # Use the new process_documents function with impact_factors_df
+        openalex_df = process_documents(openalex_works, journals_df=impact_factors_df)
+
+        # Clean DOI for OpenAlex DataFrame (ISSN cleaning is now handled in process_documents)
+        openalex_df['doi_clean'] = openalex_df['doi'].apply(clean_doi)
+
+        # Rename columns to ensure consistency before merging
+        sem_df, openalex_df = renaming_columns(sem_df, openalex_df)
+
+        # Merge the two DataFrames using merge_unique_by_doi
+        final_df = merge_unique_by_doi(sem_df, openalex_df)
+
+        # Store the merged DataFrame
+        store_research_data3(final_df)
+
+        # Return a success response
+        return jsonify({
+            'message': 'Research data fetched, merged, and stored successfully',
+            'papers_processed': len(final_df),
+            'semantic_scholar_papers': len(sem_df),
+            'openalex_papers': len(openalex_df)
+        }), 200
+        
+        
+    @app.route('/top_keyword', methods=['GET'])
+    def keyword_analysis():
+        try:
+            # Fetch patent data from the database
+            query = 'SELECT * FROM raw_patents'
+            logger.info("Fetching patent data from raw_patents table")
+            df = pd.read_sql(query, engine)
+        
+            if df.empty:
+                logger.warning("No patent data found in the database")
+                return jsonify({"error": "No patent data found in the database"}), 404
+        
+            # Preprocess the Titre column
+            logger.info("Preprocessing patent titles")
+            df['title'] = df['Title'].apply(preprocess_text)
+        
+            # Extract texts, dropping any nulls
+            texts = df['title'].dropna().tolist()
+            if not texts:
+                logger.warning("No valid texts after preprocessing")
+                return jsonify({"error": "No valid texts available after preprocessing"}), 400
+        
+            # Extract top keywords
+            logger.info(f"Extracting top keywords from {len(texts)} texts")
+            top_keywords = extract_keywords(texts)
+        
+            if not top_keywords:
+                logger.warning("No keywords extracted (possibly due to insufficient documents)")
+                return jsonify({"warning": "No keywords extracted, try adjusting min_df or adding more data"}), 200
+        
+            # Format keywords for JSON response
+            keywords_response = [{"keyword": keyword, "score": float(score)} for keyword, score in top_keywords]
+        
+            logger.info("Successfully extracted keywords")
+            return jsonify({
+                "status": "success",
+                "keywords": keywords_response,
+                "count": len(keywords_response)
+            }), 200
+    
+        except sqlalchemy.exc.SQLAlchemyError as e:
+            logger.error(f"Database error: {str(e)}")
+            return jsonify({"error": f"Database error: {str(e)}"}), 500
+        except Exception as e:
+            logger.error(f"Unexpected error: {str(e)}")
+            return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        
+        
+                    
+    @app.route('/api/processed_texts', methods=['GET'])
+    def get_processed_texts_from_db():
+            """
+            1) Fetch the 'Title' column from raw_patents.
+            2) Preprocess each title with preprocess_text(...).
+            3) Return JSON: { "processed": [ "...", "...", ... ] }.
+            """
+            try:
+                # 1) Read only the Title column from raw_patents
+                query = 'SELECT "Title" FROM raw_patents'
+                df = pd.read_sql(query, engine)
+
+                if df.empty:
+                    return jsonify({"error": "No records found in raw_patents"}), 404
+
+                # 2) Apply preprocess_text to every Title, skipping NaN
+                processed_list = []
+                for raw_title in df['Title'].fillna(""):
+                    proc = preprocess_text(raw_title, use_stemming=True)
+                    if proc: 
+                        processed_list.append(proc)
+
+                if not processed_list:
+                    return jsonify({"error": "No valid text to process"}), 400
+
+                # 3) Return JSON array
+                return jsonify({"processed": processed_list}), 200
+
+            except sqlalchemy.exc.SQLAlchemyError as e:
+                # Database‐level errors
+                logger.error(f"Database error in /api/processed_texts: {e}")
+                return jsonify({"error": f"Database error: {str(e)}"}), 500
+
+            except Exception as e:
+                # Any other unexpected errors
+                logger.error(f"Unexpected error in /api/processed_texts: {e}")
+                return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+            
+            
+            
+    @app.route('/api/patents/first_filing_years', methods=['GET'])
+    def get_first_filing_years():
+    
+        try:
+            # Simple query using the existing first_filing_year column
+            query = text('''
+                SELECT first_filing_year AS year, COUNT(*) AS count
+                FROM raw_patents
+                WHERE first_filing_year IS NOT NULL
+                GROUP BY first_filing_year
+                ORDER BY year
+            ''')
+
+            with engine.connect() as conn:
+                result = conn.execute(query)
+                rows = result.fetchall()
+
+            if not rows:
+                return jsonify({"message": "No patent data available"}), 404
+
+            # Prepare data for chart
+            years = []
+            counts = []
+            for row in rows:
+                years.append(int(row[0]))
+                counts.append(row[1])
+
+            return jsonify({
+                "labels": years,
+                "datasets": [{
+                    "label": "Number of Patents",
+                    "data": counts,
+                    "borderColor": "rgb(75, 192, 192)",
+                    "tension": 0.1
+                }]
+            }), 200
+
+        except Exception as e:
+            logger.error(f"Error fetching filing years: {str(e)}")
+            return jsonify({"error": f"Failed to retrieve filing years: {str(e)}"}), 500
+        
+        
+        
+        
+    # @app.route('/api/topic_evolution', methods=['GET'])
+    # def topic_evolution():
+    #     """
+    #     Endpoint to analyze topic evolution in patent data.
+    #     Queries RawPatent table, creates a DataFrame, and applies topic evolution analysis.
+    #     Returns results as JSON.
+    #     """
+    #     try:
+    #         # Query database for required columns
+    #         patents = db.session.query(
+    #             RawPatent.first_publication_number.label('first publication number'),
+    #             RawPatent.title.label('Title'),
+    #             RawPatent.first_filing_year.label('first filing year')
+    #         ).all()
+            
+    #         if not patents:
+    #             logger.info("No patents found in the database")
+    #             return jsonify({"message": "No patents found in the database"}), 404
+            
+    #         # Create DataFrame from query results
+    #         keyword_df = pd.DataFrame([row._asdict() for row in patents])
+            
+    #         # Drop rows where 'Title' is null
+    #         keyword_df = keyword_df.dropna(subset=['Title'])
+            
+    #         if keyword_df.empty:
+    #             logger.info("No patents with valid titles after filtering")
+    #             return jsonify({"message": "No patents with valid titles"}), 404
+            
+            
+    #         # Analyze topic evolution
+    #         topic_evolution, windows = analyze_topic_evolution(keyword_df)
+            
+    #         logger.info("Topic evolution analysis completed successfully")
+    #         return jsonify({
+    #             "topic_evolution": topic_evolution,
+    #             "windows": windows
+    #         }), 200
+        
+    #     except Exception as e:
+    #         logger.error(f"Error in topic_evolution endpoint: {str(e)}")
+    #         return jsonify({"error": f"Failed to process topic evolution: {str(e)}"}), 500
+        
+
+
+
+
+    def get_top_keywords(tfidf_matrix, feature_names, top_n=5):
+        """
+        Get top N keywords for each document in the TF-IDF matrix.
+        """
+        top_keywords = []
+        for row in tfidf_matrix:
+            top_indices = row.toarray().argsort()[0][-top_n:][::-1]
+            top_words = [feature_names[i] for i in top_indices]
+            top_keywords.append(top_words)
+        return top_keywords
+
+    @app.route('/api/topic_evolution', methods=['GET'])
+    def topic_evolution():
+        """
+        Endpoint to analyze topic evolution in patent data.
+        Stores data in patent_keywords only if keyword_df is not empty,
+        analyzes topic evolution, and returns results as JSON.
+        """
+        try:
+            # Query database for required columns
+            patents = db.session.query(
+                RawPatent.first_publication_number.label('first publication number'),
+                RawPatent.title.label('Title'),
+                RawPatent.first_filing_year.label('first filing year')
+            ).all()
+        
+            if not patents:
+                logger.info("No patents found in the database")
+                return jsonify({"message": "No patents found in the database"}), 404
+        
+            # Create DataFrame from query results
+            keyword_df = pd.DataFrame([row._asdict() for row in patents])
+        
+            # Drop rows where 'Title' is null
+            keyword_df = keyword_df.dropna(subset=['Title'])
+        
+            if keyword_df.empty:
+                logger.info("No patents with valid titles after filtering")
+                return jsonify({"message": "No patents with valid titles"}), 404
+        
+            # Preprocess titles
+            keyword_df['processed_title'] = keyword_df['Title'].apply(preprocess_text)
+        
+            # Compute TF-IDF
+            vectorizer = TfidfVectorizer(max_df=0.85, min_df=2, ngram_range=(1, 3))
+            tfidf_matrix = vectorizer.fit_transform(keyword_df['processed_title'])
+            feature_names = vectorizer.get_feature_names_out()
+        
+            # Get top keywords for each patent
+            top_keywords_list = get_top_keywords(tfidf_matrix, feature_names, top_n=5)
+        
+            # Store in patent_keywords only if keyword_df is not empty
+            for i, row in keyword_df.iterrows():
+                patent_keyword = PatentKeyword(
+                    first_publication_number=row['first publication number'],
+                    title=row['Title'],
+                    first_filing_year=row['first filing year'],
+                    keywords=top_keywords_list[i]
+                )
+                db.session.add(patent_keyword)
+            db.session.commit()
+        
+            # Analyze topic evolution
+            topic_evolution_data, windows_data , divergences, valid_years = analyze_topic_evolution(keyword_df)
+        
+            # Delete existing Window and Topic records
+            db.session.query(Topic).delete()
+            db.session.query(Window).delete()
+            db.session.query(Divergence).delete()
+            db.session.commit()
+        
+            # Insert new windows
+            window_objects = []
+            for win in windows_data:
+                window = Window(start_year=win['start'], end_year=win['end'])
+                db.session.add(window)
+                window_objects.append(window)
+            db.session.commit()
+        
+            # Map (start, end) to window objects
+            window_dict = {(w.start_year, w.end_year): w for w in window_objects}
+        
+            # Insert topics
+            for topic_data in topic_evolution_data:
+                start = topic_data['start']
+                end = topic_data['end']
+                window = window_dict.get((start, end))
+                if window:
+                    topic_id_str = topic_data['topic_id']
+                    topic_number = int(topic_id_str.split('-')[-1])
+                    topic = Topic(
+                        window_id=window.id,
+                        topic_number=topic_number,
+                        words=topic_data['words'],
+                        weights=topic_data['weights']
+                    )
+                    db.session.add(topic)
+            db.session.commit()
+            
+                   # Insert divergences
+            for i in range(len(divergences)):
+                from_year = int(valid_years[i])
+                to_year = int(valid_years[i + 1])
+                divergence_value = float(divergences[i])
+                divergence_record = Divergence(from_year=from_year, to_year=to_year, divergence=divergence_value)
+                db.session.add(divergence_record)
+            db.session.commit()
+        
+            # Query stored data
+            windows = Window.query.order_by(Window.start_year).all()
+            topics = Topic.query.join(Window).order_by(Window.start_year, Topic.topic_number).all()
+            divergences_query = Divergence.query.order_by(Divergence.from_year).all()
+
+            window_list = [
+                {
+                    'start': w.start_year,
+                    'end': w.end_year,
+                    'years': list(range(w.start_year, w.end_year + 1))
+                } for w in windows
+            ]
+        
+            topic_evolution_list = [
+                {
+                    'start': t.window.start_year,
+                    'end': t.window.end_year,
+                    'topic_id': f"{t.window.start_year}-{t.topic_number}",
+                    'words': t.words,
+                    'weights': t.weights
+                } for t in topics
+            ]
+            divergences_list = [
+            {
+                'from_year': d.from_year,
+                'to_year': d.to_year,
+                'divergence': d.divergence
+            } for d in divergences_query
+        ]
+        
+            # Query patent_keywords for response
+            patent_keywords = PatentKeyword.query.all()
+            patent_keywords_list = [
+                {
+                    'first_publication_number': pk.first_publication_number,
+                    'title': pk.title,
+                    'first_filing_year': pk.first_filing_year,
+                    'keywords': pk.keywords
+                } for pk in patent_keywords
+            ]
+        
+            logger.info("Topic evolution analysis and keyword extraction completed successfully")
+            return jsonify({
+                "topic_evolution": topic_evolution_list,
+                "windows": window_list,
+                "patent_keywords": patent_keywords_list,
+                "divergences": divergences_list
+            }), 200
+    
+        except Exception as e:
+            db.session.rollback()
+            logger.error(f"Error in topic_evolution endpoint: {str(e)}")
+            return jsonify({"error": f"Failed to process topic evolution: {str(e)}"}), 500
+
+
+    
+    @app.route('/api/automatic_topic_shift', methods=['GET'])
+    def automatic_topic_shift():
+        try:
+            # Query all divergences, ordered by from_year
+            divergences = Divergence.query.order_by(Divergence.from_year).all()
+            if not divergences:
+                return jsonify({"message": "No divergence data available"}), 200
+
+            # Calculate threshold as the 80th percentile of divergence values
+            divergence_values = [d.divergence for d in divergences]
+            threshold = np.percentile(divergence_values, 80) if divergence_values else 0
+
+            # Query all windows, ordered by start_year
+            windows = Window.query.order_by(Window.start_year).all()
+
+            # Format divergence data
+            divergence_data = [
+                {
+                    "from_year": d.from_year,
+                    "to_year": d.to_year,
+                    "divergence": d.divergence
+                }   
+                for d in divergences
+            ]
+
+            # Format windows data
+            window_list = [
+                {
+                    "start": w.start_year,
+                    "end": w.end_year
+                }
+                for w in windows
+            ]
+
+            # Construct and return the JSON response
+            response = {
+                "divergence_data": divergence_data,
+                "threshold": threshold,
+                "windows": window_list
+            }
+            return jsonify(response), 200
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+        
+    @app.route('/api/evolving_word_clouds', methods=['GET'])
+    def evolving_word_clouds():
+        try:
+            # Query all windows, ordered by start year
+            windows = Window.query.order_by(Window.start_year).all()
+            result = []
+
+            for window in windows:
+                # Query topics associated with this window
+                topics = Topic.query.filter_by(window_id=window.id).all()
+            
+                # Collect all words from topics in this window
+                all_words = [word for topic in topics for word in topic.words]
+            
+                if not all_words:
+                    continue
+            
+                # Count frequency of each word (replicates WordCloud's default behavior)
+                word_freq = Counter(all_words)
+            
+                # Format word frequencies as a list of dictionaries
+                word_freq_list = [{'word': word, 'frequency': freq} for word, freq in word_freq.items()]
+            
+                # Append window data to result
+                result.append({
+                    'start': window.start_year,
+                    'end': window.end_year,
+                    'word_frequencies': word_freq_list
+                })
+        
+            return jsonify(result), 200
+    
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+
+
+
+    # @app.route('/fetch_research_data', methods=['POST'])
+    # def fetch_research_data():
+    #     # Get query from the request
+    #     data = request.get_json()
+    #     query = data.get('query')
+    
+    #     if not query:
+    #         return jsonify({'error': 'Query is required'}), 400
+    
+    #     # Load impact factors from the database for Semantic Scholar processing
+    #     impact_factors = db.session.query(ImpactFactor).all()
+    
+    #     # Fetch and process Semantic Scholar data
+    #     # Note: Assumes fetch_research_data2 includes 'externalIds' in fields
+    #     papers = fetch_research_data3(query)
+    #     if not papers:
+    #         return jsonify({'error': 'No papers found from Semantic Scholar or API error occurred'}), 500
+    #     sem_df = process_research_data3(papers, impact_factors)
+    
+    #     # Add DOI cleaning for Semantic Scholar DataFrame
+    #     # Assumes 'DOI' is extracted in process_research_data2 from externalIds
+    #     sem_df['doi_clean'] = sem_df['DOI'].apply(clean_doi)
+    
+    #     # Fetch and process OpenAlex data
+    #     openalex_works = fetch_openalex_works(max_docs=300, per_page=200)
+    #     if not openalex_works:
+    #         return jsonify({'error': 'No works found from OpenAlex or API error occurred'}), 500
+    #     openalex_df = process_documents(openalex_works)
+    
+    #     # Clean ISSN and DOI for OpenAlex DataFrame
+    #     openalex_df['journal_issn_l_clean'] = openalex_df['journal_issn_l'].apply(clean_issn)
+    #     openalex_df['doi_clean'] = openalex_df['DOI'].apply(clean_doi)
+    
+    #     # Rename columns to ensure consistency before merging
+    #     sem_df, openalex_df = renaming_columns(sem_df, openalex_df)
+    
+    #     # Merge the two DataFrames using merge_unique_by_doi
+    #     final_df = merge_unique_by_doi(sem_df, openalex_df)
+    
+    #     # Store the merged DataFrame
+    #     store_research_data3(final_df)
+    
+    # # Return a success response
+    #     return jsonify({
+    #         'message': 'Research data fetched, merged, and stored successfully',
+    #         'papers_processed': len(final_df)
+    #     }), 200
+
+
+
+
+
+
+
 
 
 #@app.route('/api/family_members/API', methods=['POST']) 
