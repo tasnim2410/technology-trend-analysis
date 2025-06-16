@@ -451,9 +451,6 @@ def clean_and_process_data():
     
 #     return {"message": "Data processed and stored successfully", "records_stored": len(filtered_df)}
   
-  
-  
-from sqlalchemy import text, inspect
 
 from sqlalchemy import text, inspect
 

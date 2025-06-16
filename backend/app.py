@@ -46,13 +46,17 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 import numpy as np
 from flask import jsonify
 import pandas as pd
+
 from collections import Counter
+from keywords_coccurrence_trends import track_cooccurrence_trends , clean_text_remove_stopwords
 
-
+from collections import defaultdict
 from keyword_analysis import preprocess_text, analyze_topic_evolution
 import logging
+from patent_trend_by_field import get_ipc_meaning , normalize_engineering, get_patent_fields
+from db import Window, Topic , PatentKeyword ,Divergence ,IPCClassification , ClassifiedPatent , IPCFieldOfStudy , Applicant , ApplicantType
+from applicant_analysis import get_applicants_df, get_applicant_type_df
 
-from db import Window, Topic , PatentKeyword ,Divergence # <-- Add this import for Window and Topic models
 load_dotenv()
 
 def create_app():
@@ -63,10 +67,10 @@ def create_app():
     app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL')
     app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
     db.init_app(app)
-    logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-    )
+    # logging.basicConfig(
+    # level=logging.INFO,
+    # format='%(asctime)s - %(levelname)s - %(message)s'
+    # )
     logger = logging.getLogger(__name__)    
     
 # Set up logging
@@ -486,6 +490,8 @@ def create_app():
         
     @app.route('/top_keyword', methods=['GET'])
     def keyword_analysis():
+        
+        
         try:
             # Fetch patent data from the database
             query = 'SELECT * FROM raw_patents'
@@ -909,6 +915,443 @@ def create_app():
         except Exception as e:
             return jsonify({"error": str(e)}), 500
 
+    @app.route('/api/weighted_word_clouds', methods=['GET'])
+    def weighted_word_clouds():
+        """
+        Endpoint to generate word cloud data for each time window.
+        Aggregates word weights across all topics within each window.
+        Returns a JSON response with start/end years and word-weight pairs.
+        """
+        try:
+            # Set up logging
+            logger = logging.getLogger(__name__)
+
+            # Query all windows, ordered by start year
+            windows = Window.query.order_by(Window.start_year).all()
+            result = []
+
+            for window in windows:
+                # Use defaultdict to accumulate weights for each word
+                word_weight_dict = defaultdict(float)
+
+                # Query all topics associated with this window
+                topics = Topic.query.filter_by(window_id=window.id).all()
+
+                for topic in topics:
+                    # Validate that words and weights arrays have the same length
+                    if len(topic.words) != len(topic.weights):
+                        logger.warning(
+                            f"Skipping topic {topic.id}: words and weights lengths mismatch "
+                            f"({len(topic.words)} words, {len(topic.weights)} weights)"
+                        )
+                        continue
+
+                    # Aggregate weights by summing for each word
+                    for word, weight in zip(topic.words, topic.weights):
+                        processed_word = preprocess_text(word.lower())
+                        if processed_word and processed_word.strip():
+                            word_weight_dict[word] += weight
+
+                # Skip if no words were aggregated
+                if not word_weight_dict:
+                    logger.info(f"No valid words found for window {window.start_year}-{window.end_year}")
+                    continue
+
+                # Convert aggregated weights to a sorted list of dictionaries
+                word_list = [
+                    {"word": word, "weight": weight}
+                    for word, weight in sorted(word_weight_dict.items(), key=lambda x: x[1], reverse=True)
+                ]
+
+                # Append window data to the result
+                result.append({
+                    "start": window.start_year,
+                    "end": window.end_year,
+                    "words": word_list
+                })
+
+            # Log successful completion
+            logger.info(f"Generated word cloud data for {len(result)} windows")
+            return jsonify(result), 200
+
+        except Exception as e:
+            logger.error(f"Error in weighted_word_clouds endpoint: {str(e)}")
+            return jsonify({"error": str(e)}), 500
+        
+        
+    @app.route('/classify_patents', methods=['POST'])
+    def classify_patents():
+        try:
+            # 1) If the IPCClassification table is empty, load from CSV
+            if IPCClassification.query.count() == 0:
+                csv_path = 'classification_df.csv'  
+
+               
+                df = pd.read_csv(
+                    csv_path,
+                    sep=';',
+                    usecols=['CPC Symbol', 'Classification Title']
+                )
+
+                # Rename columns so they match the model field names
+                df.columns = ['cpc_symbol', 'classification_title']
+
+                # Use cpc_symbol as the DataFrame index for easy lookup
+                df.set_index('cpc_symbol', inplace=True)
+
+                # Insert into the database
+                for code, row in df.iterrows():
+                    new_class = IPCClassification(
+                        cpc_symbol=code,
+                        classification_title=row['classification_title']
+                    )
+                    db.session.add(new_class)
+                db.session.commit()
+                
+            if IPCFieldOfStudy.query.count() == 0:
+                csv_path = 'IPC_to_fieldOfStudy.csv'  
+
+                df = pd.read_csv(
+                    csv_path,
+                    sep=',',
+                    usecols=lambda x: x in ['IPC', 'description', 'fields'] 
+                )
+
+                # Rename columns so they match the model field names
+                df.columns = ['ipc','description', 'fields']
+
+                # Use cpc_symbol as the DataFrame index for easy lookup
+                df.set_index('ipc', inplace=True)
+
+                # Insert into the database
+                for code, row in df.iterrows():
+                    new_field = IPCFieldOfStudy(
+                        ipc=code,
+                        fields=row['fields'],
+                        description=row['description']
+                    )
+                    db.session.add(new_field)
+                db.session.commit()
+
+            # 2) Build a lookup DataFrame from whatever is currently in the table
+            all_rows = IPCClassification.query.all()
+            classification_dict = {
+                row.cpc_symbol: row.classification_title
+                for row in all_rows
+            }
+            classification_df = pd.DataFrame.from_dict(
+                classification_dict,
+                orient='index',
+                columns=['classification_title']
+            )
+            classification_df.index.name = 'cpc_symbol'
+            
+            all_rows2 = IPCFieldOfStudy.query.all()
+            field_of_study_dict = {
+                row.ipc: {
+                    'ipc': row.ipc,
+                    'fields': row.fields,
+                    'description': row.description
+                }
+                for row in all_rows2
+            }
+
+            field_of_study_df = pd.DataFrame.from_dict(
+                field_of_study_dict,
+                orient='index',
+                columns=['ipc','fields', 'description']
+            )
+            field_of_study_df.index.name = 'ipc'
+            field_of_study_df['fields'] = field_of_study_df['fields'].apply(lambda x: ast.literal_eval(x) if isinstance(x, str) else x)
+            field_of_study_df['fields'] = field_of_study_df['fields'].apply(normalize_engineering)
+            field_of_study_df['ipc'] = field_of_study_df['ipc'].str[:3].str.strip().str.upper()
+            #ipc_mapping = field_of_study_df.set_index('IPC')['fields'].to_dict()
+            # 3) Fetch unclassified patents and assign the “meaning” based on IPC codes
+            patents = RawPatent.query.all()
+            if not patents:
+                return jsonify({"message": "No patents found to classify"}), 200
+
+            updated_count = 0
+            for patent in patents:
+                if not patent.ipc:
+                    continue
+                # Cleanup step #1: remove leading/trailing braces & quotes:
+
+                cleaned = patent.ipc.strip('"{}')
+                # Cleanup step #2: split on commas, drop any empty strings
+                
+                ipc_list = [code.strip() for code in cleaned.split(',') if code.strip()]
+                if not ipc_list:
+                    continue
+                
+                meaning = get_ipc_meaning(ipc_list, classification_df)
+                fields = get_patent_fields(ipc_list, field_of_study_df)  
+                if isinstance(fields, str):
+                    try:
+                        fields = ast.literal_eval(fields)
+                    except Exception:
+                        fields = [fields]
+                if meaning:
+                # Check if this patent already exists in classified_patents
+                    existing = ClassifiedPatent.query.get(patent.id)
+                    if existing:
+                        # Update existing record
+                        existing.ipc_meaning = meaning
+                        existing.fields = fields 
+                    else:
+                        # Create new classified patent record
+                        classified_patent = ClassifiedPatent(
+                            id=patent.id,
+                            title=patent.title,
+                            inventors=patent.inventors,
+                            applicants=patent.applicants,
+                            publication_number=patent.publication_number,
+                            earliest_priority=patent.earliest_priority,
+                            earliest_publication=patent.earliest_publication,
+                            ipc=patent.ipc,
+                            cpc=patent.cpc,
+                            publication_date=patent.publication_date,
+                            first_publication_date=patent.first_publication_date,
+                            second_publication_date=patent.second_publication_date,
+                            first_filing_year=patent.first_filing_year,
+                            earliest_priority_year=patent.earliest_priority_year,
+                            applicant_country=patent.applicant_country,
+                            family_number=patent.family_number,
+                            family_jurisdictions=patent.family_jurisdictions,
+                            family_members=patent.family_members,
+                            first_publication_number=patent.first_publication_number,
+                            second_publication_number=patent.second_publication_number,
+                            first_publication_country=patent.first_publication_country,
+                            second_publication_country=patent.second_publication_country,
+                            ipc_meaning=meaning,
+                            fields=fields
+                        )
+                        db.session.add(classified_patent)
+                    updated_count += 1
+
+            db.session.commit()
+            return jsonify({
+                "message": f"Successfully processed {updated_count} patents",
+                "classified_count": updated_count
+            }), 200
+        except Exception as e:
+                db.session.rollback()
+                return jsonify({"error": f"Failed to classify patents: {str(e)}"}), 500
+        
+    @app.route('/api/patent_field_trends', methods=['GET'])
+    def patent_field_trends():
+        """
+        Returns JSON for plotting field trends over time.
+        Query params:
+        - top_n: number of top fields to return (default 5)
+        - smoothing: rolling window size (default 3)
+        """
+        try:
+            top_n = int(request.args.get('top_n', 5))
+            smoothing = int(request.args.get('smoothing', 3))
+
+            # Query classified patents with year and fields
+            patents = ClassifiedPatent.query.with_entities(
+                ClassifiedPatent.first_filing_year,
+                ClassifiedPatent.fields
+            ).filter(ClassifiedPatent.first_filing_year.isnot(None)).all()
+
+            # Build DataFrame
+            rows = []
+            for year, fields in patents:
+                # Ensure fields is a list
+                if isinstance(fields, str):
+                    try:
+                        fields = ast.literal_eval(fields)
+                    except Exception:
+                        fields = [fields]
+                for field in fields:
+                    rows.append({'year': int(year), 'field': field})
+
+            if not rows:
+                return jsonify({"labels": [], "datasets": []})
+
+            df = pd.DataFrame(rows)
+            # Count papers per year/field
+            field_counts = (
+                df.groupby(['year', 'field'])
+                .size()
+                .reset_index(name='count')
+            )
+            # Pivot for trend lines
+            pivot = field_counts.pivot(index='year', columns='field', values='count').fillna(0)
+            # Smooth with rolling average
+            pivot_smooth = pivot.rolling(window=smoothing, min_periods=1).mean()
+
+            # Pick top N fields by total count
+            top_fields = pivot.sum().sort_values(ascending=False).head(top_n).index
+            labels = list(map(int, pivot_smooth.index))
+
+            datasets = []
+            for field in top_fields:
+                datasets.append({
+                    "label": field,
+                    "data": [int(v) for v in pivot_smooth[field].values]
+                })
+
+            return jsonify({
+                "labels": labels,
+                "datasets": datasets
+            }), 200
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+
+    @app.route('/api/cooccurrence_trends', methods=['GET'])
+    def cooccurrence_trends():
+        """
+        Returns JSON data for plotting co-occurrence trends of technology keyword pairs.
+        Removes English and French stopwords from titles and ensures term pairs are not identical.
+        """
+        try:
+            # Fetch patent data from the database
+            query = 'SELECT "Publication number", "Title", "first_filing_year" FROM raw_patents'
+            df = pd.read_sql(query, engine)
+            df = df.dropna(subset=['Title', 'first_filing_year'])
+
+            # Remove stopwords from Title
+            df['Title'] = df['Title'].apply(clean_text_remove_stopwords)
+
+            # Remove empty titles after cleaning
+            df = df[df['Title'].str.strip().astype(bool)]
+
+            # Prepare the grouped DataFrame as required by track_cooccurrence_trends
+            grouped = df.groupby("first_filing_year")["Title"].apply(lambda texts: " ".join(texts)).reset_index()
+
+            # Run the co-occurrence trend analysis
+            cooc_trends = track_cooccurrence_trends(
+                grouped,
+                time_col='first_filing_year',
+                text_col='Title',
+                window_size=5,
+                min_count=10
+            )
+
+            # Filter out pairs where both terms are the same (case-insensitive)
+            cooc_trends = cooc_trends[cooc_trends['term1'].str.lower() != cooc_trends['term2'].str.lower()]
+
+            # Get top emerging and declining combinations
+            emerging_tech = cooc_trends[
+                (cooc_trends.slope > 0) & (cooc_trends.p_value < 0.05)
+            ].sort_values('slope', ascending=False).head(5)
+
+            declining_tech = cooc_trends[
+                (cooc_trends.slope < 0) & (cooc_trends.p_value < 0.05)
+            ].sort_values('slope').head(5)
+
+            # Prepare data for plotting
+            def prepare_plot_data(df):
+                plot_data = []
+                for _, row in df.iterrows():
+                    for year, freq in row['frequency_history']:
+                        plot_data.append({
+                            'year': int(year),
+                            'frequency': int(freq),
+                            'term_pair': f"{row['term1']} & {row['term2']}"
+                        })
+                return plot_data
+
+            response = {
+                "emerging": prepare_plot_data(emerging_tech),
+                "declining": prepare_plot_data(declining_tech),
+                "emerging_pairs": [
+                    {
+                        "term1": row['term1'],
+                        "term2": row['term2'],
+                        "slope": row['slope'],
+                        "total_count": row['total_count']
+                    }
+                    for _, row in emerging_tech.iterrows()
+                ],
+                "declining_pairs": [
+                    {
+                        "term1": row['term1'],
+                        "term2": row['term2'],
+                        "slope": row['slope'],
+                        "total_count": row['total_count']
+                    }
+                    for _, row in declining_tech.iterrows()
+                ]
+            }
+            return jsonify(response), 200
+
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
+        
+        
+        
+    @app.route('/analyze_applicants', methods=['POST'])
+    def analyze_applicants():
+        # Load patent data from DB
+        patents = RawPatent.query.all()
+        data = []
+        for patent in patents:
+            data.append({
+                'first applicant': patent.applicants.split('\n')[0] if patent.applicants else None,
+                'second applicant': patent.applicants.split('\n')[1] if patent.applicants and '\n' in patent.applicants else None,
+                'Inventors': patent.inventors
+            })
+        df = pd.DataFrame(data)
+        # Fill missing columns if needed
+        if 'Inventors' not in df.columns:
+            df['Inventors'] = None
+
+        # Generate DataFrames
+        applicants_df = get_applicants_df(df)
+        applicant_type_df = get_applicant_type_df(applicants_df)
+
+        # Store applicants_df
+        Applicant.query.delete()
+        for _, row in applicants_df.iterrows():
+            db.session.add(Applicant(applicant_name=row['Applicants'], applicant_type=row['Applicant Type']))
+        db.session.commit()
+
+        # Store applicant_type_df
+        ApplicantType.query.delete()
+        for _, row in applicant_type_df.iterrows():
+            db.session.add(ApplicantType(applicant_type=row['Applicant Type'], percentage=row['Percentage']))
+        db.session.commit()
+
+        return jsonify({"status": "success"})
+    
+    
+    @app.route('/api/applicant_type_summary', methods=['GET'])
+    def applicant_type_summary():
+        """
+        Returns applicant type distribution for visualization.
+    Example response:
+    {
+        "labels": ["Company - Incorporated/Corporation", "University/Research Institution", ...],
+        "percentages": [45.2, 30.1, ...],
+        "details": [
+            {"applicant_name": "Toyota Motor Corp", "applicant_type": "Company - Incorporated/Corporation"},
+            ...
+        ]
+    }
+     """
+        # Query summary table
+        summary = ApplicantType.query.order_by(ApplicantType.percentage.desc()).all()
+        labels = [row.applicant_type for row in summary]
+        percentages = [row.percentage for row in summary]
+
+        # Optionally, provide a detailed list (for tooltips, drill-down, etc.)
+        applicants = Applicant.query.all()
+        details = [
+            {"applicant_name": a.applicant_name, "applicant_type": a.applicant_type}
+            for a in applicants
+        ]
+
+        return jsonify({
+            "labels": labels,
+            "percentages": percentages,
+            "details": details
+        })
 
 
     # @app.route('/fetch_research_data', methods=['POST'])

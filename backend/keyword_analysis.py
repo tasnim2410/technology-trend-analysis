@@ -299,12 +299,13 @@ import seaborn as sns
 stemmer = PorterStemmer()
 lemmatizer = WordNetLemmatizer()
 
-_stop_words = set(stopwords.words("english"))
+_stop_words = set(stopwords.words("english")) | set(stopwords.words("french"))
 _stemmer    = PorterStemmer()
 _lemmatizer = WordNetLemmatizer()
 
 def preprocess_text(text: str, use_stemming: bool = True) -> str:
     text = unicodedata.normalize("NFKC", text)
+    text = text.encode("ascii", "ignore").decode("ascii")
     text = text.lower()
     text = contractions.fix(text)
     text = re.sub(r"<[^>]+>", " ", text)
@@ -444,3 +445,5 @@ def analyze_topic_evolution(keyword_df):
             continue
 
     return topic_evolution, windows, divergences, valid_years
+
+
